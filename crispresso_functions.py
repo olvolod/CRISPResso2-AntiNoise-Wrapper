@@ -316,8 +316,8 @@ def build_fallback_command(task, seq_df, params, param_df, fastq_dict, guide_seq
     fallback_task["guide_id"] = ""
 
     # if extension → deleting expected_seq
-    if is_extension:
-        fallback_task["expected_seq"] = ""
+    # if is_extension:
+        # fallback_task["expected_seq"] = ""
 
     # building command
     cmd = build_command(fallback_task, seq_df, params, param_df, fastq_dict)
@@ -507,106 +507,256 @@ def load_tables_fallback(sample_name):
     spacer_total = spacer_df["#Reads"].sum()
 
     return ext_df, spacer_df, ext_total, spacer_total
-    
-def filter_extension_not_in_spacer(ext_df, spacer_df):
+import os
+import pandas as pd
 
-    cols = ["Aligned_Sequence", "#Reads"]
 
-    check = ext_df.merge(
-        spacer_df[cols],
-        on=cols,
-        how="left",
-        indicator=True
-    )
+def update_spacer_from_extension(spacer_df, ext_df, sample_name):
+    """
+    Обновляет spacer по результатам extension.
 
-    extra = check[check["_merge"] == "left_only"]
+    Логика:
+    1. Берём только MODIFIED аллели из extension.
+    2. Если последовательность есть в spacer:
+       - переключаем Read_Status в MODIFIED;
+       - переносим n_deleted/n_inserted/n_mutated.
+    3. Последовательности, которых нет в spacer,
+       сохраняем отдельным файлом.
+    """
 
-    print("Extra rows in extension:", len(extra))
-    print("Extra reads:", extra["#Reads"].sum())
+    spacer = spacer_df.copy()
+
+    # словарь MODIFIED аллелей extension
+    ext_lookup = {
+        row["Aligned_Sequence"]: row
+        for _, row in ext_df.iterrows()
+        if row["Read_Status"] == "MODIFIED"
+    }
+
+    updated = 0
+
+    for idx, row in spacer.iterrows():
+
+        seq = row["Aligned_Sequence"]
+
+        if seq not in ext_lookup:
+            continue
+
+        ext_row = ext_lookup[seq]
+
+        # переключаем статус
+        if row["Read_Status"] == "UNMODIFIED":
+            spacer.at[idx, "Read_Status"] = "MODIFIED"
+            updated += 1
+
+        # переносим аннотацию из extension
+        spacer.at[idx, "n_deleted"] = ext_row["n_deleted"]
+        spacer.at[idx, "n_inserted"] = ext_row["n_inserted"]
+        spacer.at[idx, "n_mutated"] = ext_row["n_mutated"]
+
+        # последовательность обработана
+        del ext_lookup[seq]
+
+    print(f"Updated spacer statuses: {updated}")
+
+    # ---------- сохраняем extension-only ----------
+    extra = pd.DataFrame(ext_lookup.values())
 
     if not extra.empty:
-        if not (extra["n_deleted"] > 0).all():
-            # display(extra)
-            raise ValueError("Non-deletion rows found in extension mismatch")
 
-        print("All mismatches are deletions → OK")
+        os.makedirs("outcome/extension_only_reads", exist_ok=True)
 
-    ext_filtered = check[check["_merge"] == "both"].drop(columns=["_merge"])
-
-    return ext_filtered
-
-def process_extension(ext_df, overlap):
-
-    ext_annot = annotate_window_variants(ext_df, overlap)
-
-    ext_no_overlap = ext_annot[
-        ext_annot["pos_type"] == ""
-    ].copy()
-
-    ext_modified = ext_no_overlap[
-        ext_no_overlap["Read_Status"] == "MODIFIED"
-    ].copy()
-
-    # удалить служебные колонки
-    for col in ["pos_type", "change"]:
-        if col in ext_modified.columns:
-            ext_modified.drop(columns=col, inplace=True)
-
-    print("Extension after annotation+filter:")
-    print("rows:", len(ext_modified))
-    print("reads:", ext_modified["#Reads"].sum())
-
-    return ext_modified
-
-def apply_hdr_logic(spacer_df, ext_df):
-
-    spacer_df = spacer_df.copy()
-    ext_df = ext_df.copy()
-
-    ext_sequences = set(ext_df["Aligned_Sequence"])
-
-    for idx, row in spacer_df.iterrows():
-        if row["Read_Status"] == "HDR":
-            seq = row["Aligned_Sequence"]
-
-            if seq in ext_sequences:
-
-                if row["Read_Status"] == "UNMODIFIED":
-                    spacer_df.loc[idx, "Read_Status"] = "MODIFIED"
-
-                ext_df = ext_df[
-                    ext_df["Aligned_Sequence"] != seq
-                ]
-
-    return spacer_df, ext_df
-
-def remove_extension_from_spacer(spacer_df, ext_df):
-
-    ext_sequences = set(ext_df["Aligned_Sequence"])
-
-    spacer_filtered = spacer_df[
-        ~spacer_df["Aligned_Sequence"].isin(ext_sequences)
-    ].copy()
-
-    return spacer_filtered
-
-def final_merge(spacer_df, ext_df, original_total):
-
-    merged = pd.concat([spacer_df, ext_df], ignore_index=True)
-
-    merged = merged.sort_values("#Reads", ascending=False)
-
-    final_reads = merged["#Reads"].sum()
-
-    if final_reads != original_total:
-        raise ValueError(
-            f"Read mismatch: expected {original_total}, got {final_reads}"
+        save_path = (
+            f"outcome/extension_only_reads/"
+            f"{sample_name}_extension_only.tsv"
         )
 
-    print("Final rows:", len(merged))
-    print("Final reads:", final_reads)
+        extra.to_csv(save_path, sep="\t", index=False)
 
-    return merged
+        print(f"Saved {len(extra)} extension-only alleles")
+        print(f"File: {save_path}")
+
+        print("Extra reads:", extra["#Reads"].sum())
+
+        wrong = extra[extra["n_deleted"] == 0]
+
+        if not wrong.empty:
+            print(
+                f"[WARNING] {len(wrong)} extension-only alleles "
+                f"without deletions (possible alignment artefacts)"
+            )
+
+    return spacer
+# def update_spacer_from_extension(spacer_df, ext_df):
+#     """
+#     Обновляет Read_Status в spacer по результатам extension.
+
+#     Логика:
+#     1. Берём только MODIFIED аллели extension.
+#     2. Если такая последовательность есть в spacer и там UNMODIFIED,
+#        переключаем её в MODIFIED.
+#     3. Если последовательности нет в spacer,
+#        считаем её новой и добавляем в таблицу.
+#     """
+
+#     spacer = spacer_df.copy()
+
+#     # словарь MODIFIED-последовательностей extension
+#     ext_lookup = {
+#         row["Aligned_Sequence"]: row
+#         for _, row in ext_df.iterrows()
+#         if row["Read_Status"] == "MODIFIED"
+#     }
+
+#     spacer_sequences = set(spacer["Aligned_Sequence"])
+
+#     updated = 0
+
+#     for idx, row in spacer.iterrows():
+
+#         seq = row["Aligned_Sequence"]
+
+#         if seq in ext_lookup:
+
+#             if row["Read_Status"] == "UNMODIFIED":
+#                 spacer.at[idx, "Read_Status"] = "MODIFIED"
+#                 updated += 1
+
+#             # последовательность уже обработали
+#             del ext_lookup[seq]
+
+#     print(f"Updated spacer statuses: {updated}")
+
+#     # Остались только последовательности,
+#     # которых вообще нет в spacer
+#     extra = pd.DataFrame(ext_lookup.values())
+
+
+#     if not extra.empty:
+
+#         extra["Source"] = "Extension_only"
+
+#         print(
+#         f"Saved {len(extra)} extension-only alleles"
+#         )
+
+#         merged = pd.concat(
+#         [spacer, extra],
+#         ignore_index=True
+#         )
+
+#     else:
+#         spacer = spacer
+#     return spacer    
+# def filter_extension_not_in_spacer(ext_df, spacer_df):
+
+#     cols = ["Aligned_Sequence", "#Reads"]
+
+#     check = ext_df.merge(
+#         spacer_df[cols],
+#         on=cols,
+#         how="left",
+#         indicator=True
+#     )
+
+#     extra = check[check["_merge"] == "left_only"]
+
+#     print("Extra rows in extension:", len(extra))
+#     print("Extra reads:", extra["#Reads"].sum())
+    
+
+#     if not extra.empty:
+#         # Проверяем, есть ли строки НЕ являющиеся делециями
+#         non_deletions = extra[extra["n_deleted"] == 0]
+#         if not non_deletions.empty:
+#             print(f"\n[WARNING] Найдено {len(non_deletions)} строк без делеций в extra!")
+#             # Печатаем типы мутаций, которые вызывают проблему:
+#             print(non_deletions[["Aligned_Sequence", "#Reads", "Read_Status", "n_deleted", "n_inserted"]].head(10))
+#         else:
+#             print("All mismatches are deletions → OK")
+# #    if not extra.empty:
+# #        if not (extra["n_deleted"] > 0).all():
+# #            # display(extra)
+# #            raise ValueError("Non-deletion rows found in extension mismatch")
+
+# #        print("All mismatches are deletions → OK")
+
+#     ext_filtered = check[check["_merge"] == "both"].drop(columns=["_merge"])
+
+#     return ext_filtered
+
+# def process_extension(ext_df, overlap):
+
+#     ext_annot = annotate_window_variants(ext_df, overlap)
+
+#     ext_no_overlap = ext_annot[
+#         ext_annot["pos_type"] == ""
+#     ].copy()
+
+#     ext_modified = ext_no_overlap[
+#         ext_no_overlap["Read_Status"] == "MODIFIED"
+#     ].copy()
+
+#     # удалить служебные колонки
+#     for col in ["pos_type", "change"]:
+#         if col in ext_modified.columns:
+#             ext_modified.drop(columns=col, inplace=True)
+
+#     print("Extension after annotation+filter:")
+#     print("rows:", len(ext_modified))
+#     print("reads:", ext_modified["#Reads"].sum())
+
+#     return ext_modified
+
+# def apply_hdr_logic(spacer_df, ext_df):
+
+#     spacer_df = spacer_df.copy()
+#     ext_df = ext_df.copy()
+
+#     ext_sequences = set(ext_df["Aligned_Sequence"])
+
+#     for idx, row in spacer_df.iterrows():
+#         if row["Reference_Name"] == "HDR":
+#             seq = row["Aligned_Sequence"]
+
+#             if seq in ext_sequences:
+
+#                 if row["Read_Status"] == "UNMODIFIED":
+#                     spacer_df.loc[idx, "Read_Status"] = "MODIFIED"
+
+#                 ext_df = ext_df[
+#                     ext_df["Aligned_Sequence"] != seq
+#                 ]
+
+#     return spacer_df, ext_df
+
+# def remove_extension_from_spacer(spacer_df, ext_df):
+
+#     ext_sequences = set(ext_df["Aligned_Sequence"])
+
+#     spacer_filtered = spacer_df[
+#         ~spacer_df["Aligned_Sequence"].isin(ext_sequences)
+#     ].copy()
+
+#     return spacer_filtered
+
+# def final_merge(spacer_df, ext_df, original_total):
+
+#     merged = pd.concat([spacer_df, ext_df], ignore_index=True)
+
+#     merged = merged.sort_values("#Reads", ascending=False)
+
+#     final_reads = merged["#Reads"].sum()
+
+#     if final_reads != original_total:
+#         raise ValueError(
+#             f"Read mismatch: expected {original_total}, got {final_reads}"
+#         )
+
+#     print("Final rows:", len(merged))
+#     print("Final reads:", final_reads)
+
+#     return merged
 
 def process_all_samples(sample_list, task_df, seq_df):
 
@@ -665,30 +815,48 @@ def process_sample(sample_name, task_df, seq_df):
 
     original_total = spacer_total 
 
-    ext_df_clean = filter_extension_not_in_spacer(
-        ext_df_raw,
-        spacer_df_raw
-    )
-
-    ext_df_processed = process_extension(ext_df_clean, overlap)
-
-    spacer_df_hdr, ext_df_hdr = apply_hdr_logic(
+    merged = update_spacer_from_extension(
         spacer_df_raw,
-        ext_df_processed
+        ext_df_raw,
+        sample_name
     )
 
-    spacer_df_final = remove_extension_from_spacer(
-        spacer_df_hdr,
-        ext_df_hdr
-    )
+    final_reads = merged["#Reads"].sum()
 
-    merged = final_merge(
-        spacer_df_final,
-        ext_df_hdr,
-        original_total
-    )
+    print("Final rows:", len(merged))
+    print("Final reads:", final_reads)
+
+    if final_reads != original_total:
+        print(
+            f"[WARNING] Read count mismatch: "
+            f"{final_reads} vs {original_total}"
+        )
 
     return merged
+    # ext_df_clean = filter_extension_not_in_spacer(
+    #     ext_df_raw,
+    #     spacer_df_raw
+    # )
+
+    # ext_df_processed = process_extension(ext_df_clean, overlap)
+
+    # spacer_df_hdr, ext_df_hdr = apply_hdr_logic(
+    #     spacer_df_raw,
+    #     ext_df_processed
+    # )
+
+    # spacer_df_final = remove_extension_from_spacer(
+    #     spacer_df_hdr,
+    #     ext_df_hdr
+    # )
+
+    # merged = final_merge(
+    #     spacer_df_final,
+    #     ext_df_hdr,
+    #     original_total
+    # )
+
+   # return merged
 
 def analyze_fallback_sample(sample_name, task_df, seq_df):
 
