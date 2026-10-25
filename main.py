@@ -2,7 +2,7 @@ from orchestrator import run_pipeline
 from generate_tables import generate_samples_table
 from config import RESULTS_PATH
 from pathlib import Path
-
+from validate_inputs import validate_inputs
 
 def ask_create_samples():
     while True:
@@ -19,12 +19,13 @@ if __name__ == "__main__":
     if ask_create_samples():
         print("Generating samples table...")
 
-        # можно задать путь, например outcome/
         out_dir = Path.cwd()
         generate_samples_table(out_dir=out_dir)
 
         print("Done. Please edit the file before running pipeline.")
         exit(0)
 
-    # если не создаём — запускаем пайплайн
+    if not validate_inputs():
+        raise SystemExit("Pipeline stopped. Please fix the issues above.")
+
     run_pipeline()
