@@ -337,7 +337,7 @@ def run_pipeline(samples_file='samples.csv'):
     
     # Processing noise tasks (noise = yes)
     if not noise_tasks.empty:
-        print(f"\n🧬 Processing noise tasks (noise=yes): {len(noise_tasks)}")
+        print(f"\n Processing noise tasks (noise=yes): {len(noise_tasks)}")
         noise_results = run_noise_mode(fastq_dict, seq_df, param_df, params, noise_tasks)
         all_results.extend(noise_results)
         results_file_noise = RESULTS_PATH_NOISE
@@ -538,25 +538,22 @@ def run_noise_post_processing(task_df, seq_df, params):
 
         for annotation_path in annotation_files:
             try:
-                # getting sample name
-                df_annotation, _, sample_name = ne.load_annotation_file(
-                    annotation_path
-                )
+                df_annotation, _, sample_name = ne.load_annotation_file(annotation_path)
 
-                # adding statuses based on clean_df
+                sample_clean = sample_name.replace("_fallback", "")
+                res_row = results_df[results_df["Sample"] == sample_name]
+                if res_row.empty:
+                    res_row = results_df[results_df["Sample"] == sample_clean]
+                depth = float(res_row["Reads"].iloc[0]) if not res_row.empty else None
+
                 df_annotated = ne.annotate_with_thresholds(
                     df_annotation=df_annotation,
                     df_thresholds=clean_df,
-                    sample_name=sample_name
+                    sample_name=sample_name,
+                    depth=depth
                 )
 
-                # rewrite annotation
-                df_annotated.to_csv(
-                    annotation_path,
-                    sep="\t",
-                    index=False
-                )
-
+                df_annotated.to_csv(annotation_path, sep="\t", index=False)
                 print(f"    Annotated: {sample_name}")
 
             except Exception as e:
