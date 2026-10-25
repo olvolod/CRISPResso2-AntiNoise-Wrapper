@@ -12,7 +12,7 @@ def initialize_pipeline():
     RESULTS_PATH.parent.mkdir(exist_ok=True)
     RESULTS_PATH_NOISE.parent.mkdir(exist_ok=True)
     
-    # Поиск fastq файлов
+    # finding fastq 
     fastq_dict = gt.find_fastq_files("fastq")
     
 
@@ -33,101 +33,6 @@ def initialize_pipeline():
     return fastq_dict, seq_df, samp_df, param_df, base_params, task_df
 
 
-def run_standard_mode(fastq_dict, seq_df, param_df, params, task_df):
-    """
-    Mode 1: Standard run through CRISPResso (noise = no)
-    Cas9, Base, Prime - all through build_command
-    """
-    print("\n" + "="*60)
-    print("STARTING STANDARD MODE (noise = no)")
-    print("="*60)
-    
-    # Filter tasks with noise = no
-    standard_tasks = task_df[task_df["noise"] == "no"]
-    print(f"Found tasks: {len(standard_tasks)}")
-    
-    results = []
-    failed_samples = []
-    
-    for _, task in standard_tasks.iterrows():
-        task_dict = task.to_dict()
-        sample_name = task_dict["expanded_name"]
-        print(f"\n Processing: {sample_name}")
-        
-        # Checking for existing result
-        if cf.is_sample_done(sample_name):
-            print(f" {sample_name} CRISPResso report found")
-            
-            if RESULTS_PATH.exists():
-                existing_df = pd.read_csv(RESULTS_PATH)
-                if "Sample" in existing_df.columns and sample_name in existing_df["Sample"].values:
-                    print(f" {sample_name} already analyzed, skipping completely")
-                    continue
-            
-            # If not in CSV - making only analysis
-            try:
-                res = cf.analyze_sample(sample_name)
-                if res:
-                    results.append(res)
-                    cf.update_results_table(res)
-                    print(f" Analysis done and results updated for {sample_name}")
-            except Exception as e:
-                print(f"⚠ Failed to analyze {sample_name}: {e}")
-            
-            continue
-        
-        # Forming the CRISPResso command
-        try:
-            cmd = cf.build_command(
-                task=task_dict,
-                seq_df=seq_df,
-                params=params,
-                param_df=param_df,
-                fastq_dict=fastq_dict,
-                report_dir="report"
-            )
-            
-            if not cmd:
-                print(f"⚠ Не удалось собрать команду для {sample_name}")
-                continue
-        except Exception as e:
-            print(f" Error building command: {e}")
-            continue
-        
-        # Running CRISPResso
-        try:
-            subprocess.run(cmd, check=True)
-            print(f" CRISPResso completed")
-        except subprocess.CalledProcessError as e:
-            print(f" CRISPResso failed for {sample_name} (exit {e.returncode})")
-            # For Prime with exit code 6, save for fallback
-            if task_dict["edit_mode"].lower() == "prime" and e.returncode == 6:
-                failed_samples.append(task_dict)
-            continue
-        
-        # Result analysis
-        try:
-            res = cf.analyze_sample(sample_name)
-            if res:
-                results.append(res)
-                cf.update_results_table(res)
-                print(f"✔ Analysis done")
-        except Exception as e:
-            print(f" Failed to analyze sample {sample_name}: {e}")
-        
-        # Saving intermediate results
-        save_standard_results(results)
-    
-    # Fallback for failed Prime samples
-    if failed_samples:
-        print(f"\n Starting fallback for {len(failed_samples)} failed Prime samples")
-        fallback_results = run_fallback_for_samples(
-            failed_samples, fastq_dict, seq_df, params, task_df
-        )
-        results.extend(fallback_results)
-        save_standard_results(results)
-    
-    return results
 
 
 def run_noise_mode(fastq_dict, seq_df, param_df, params, tasks):
@@ -188,89 +93,6 @@ def run_noise_mode(fastq_dict, seq_df, param_df, params, tasks):
     return results
 
 
-def run_prime_fallback_noise(tasks, fastq_dict, seq_df, params, param_df):
-    """Processing Prime samples in noise mode with fallback approach"""
-    results = []
-    
-    for _, task in tasks.iterrows():
-        task_dict = task.to_dict()
-        sample_name = task_dict["expanded_name"]
-        guide_id = task_dict.get("guide_id")
-        
-        print(f"\n Prime fallback: {sample_name}")
-        
-        # Checking for existing result
-        if cf.is_fallback_sample_done(sample_name):
-            print(f"    Fallback report found")
-            
-            if RESULTS_PATH_NOISE.exists():
-                existing_df = pd.read_csv(RESULTS_PATH_NOISE)
-                fallback_name = f"{sample_name}_fallback"
-                if fallback_name in existing_df["Sample"].values:
-                    print(f"   Already in results_noise.csv, skipping")
-                    try:
-                        res = cf.analyze_fallback_sample(sample_name, tasks, seq_df)
-                        if res:
-                            results.append(res)
-                            print(f" Data loaded for post-processing")
-                    except Exception as e:
-                        print(f" Error in analysis: {e}")
-                    continue
-        
-        # Getting sequences
-        try:
-            g = seq_df.set_index("guide_id").loc[guide_id]
-            print(f" Found guide {guide_id}")
-        except KeyError:
-            print(f" Guide {guide_id} not found")
-            continue
-        
-        spacer = g.get("spacer", "").strip()
-        extension = g.get("extension", "").strip()
-        amplicon = task_dict.get("amplicon", "")
-        
-        # Processing extension
-        rev_comp = cf.revcomp(extension)
-        processed_extension = cf.project_extension_to_amplicon(amplicon, rev_comp)
-        print(f" Spacer: {len(spacer)}nt, Extension: {len(extension)}nt")
-        
-        # Launching extension
-        print(f"  Launching extension...")
-        success_ext = run_fallback_extension(
-            sample_name, task_dict, guide_seq=processed_extension,
-            is_extension=True, fastq_dict=fastq_dict,
-            seq_df=seq_df, params=params, param_df=param_df
-        )
-        
-        if not success_ext:
-            print(f" Extension failed")
-            continue
-        print(f" Extension OK")
-        
-        # Launching spacer
-        print(f"  Launching spacer...")
-        success_spacer = run_fallback_spacer(
-            sample_name, task_dict, guide_seq=spacer,
-            is_extension=False, fastq_dict=fastq_dict,
-            seq_df=seq_df, params=params, param_df=param_df
-        )
-        
-        if success_spacer:
-            print(f" Spacer OK")
-        else:
-            print(f" Spacer failed, but extension is successful")
-        
-        # Analysis
-        try:
-            res = cf.analyze_fallback_sample(sample_name, tasks, seq_df)
-            if res:
-                results.append(res)
-                print(f" Result added: {res.get('Sample', 'Unknown')}")
-        except Exception as e:
-            print(f" Error in analysis: {e}")
-    
-    print(f"\n Total Prime results: {len(results)}")
-    return results
 
 
 
@@ -296,7 +118,7 @@ def run_fallback_extension(sample_name, task_dict, guide_seq, is_extension,
         subprocess.run(cmd, check=True)
         
         # Checking the result
-        report_dir = f"report/CRISPResso_on_{sample_name}__fallback_extension"
+        report_dir = f"report/CRISPResso_on_{sample_name}_fallback_extension"
         alleles_file = os.path.join(report_dir, "Alleles_frequency_table.zip")
         
         if os.path.exists(alleles_file):
@@ -307,8 +129,8 @@ def run_fallback_extension(sample_name, task_dict, guide_seq, is_extension,
             return False
     except subprocess.CalledProcessError as e:
         print(f"  Extension error: {e}")
-        # Проверяем, может файл все же есть
-        report_dir = f"report/CRISPResso_on_{sample_name}__fallback_extension"
+        # checking file
+        report_dir = f"report/CRISPResso_on_{sample_name}_fallback_extension"
         alleles_file = os.path.join(report_dir, "Alleles_frequency_table.zip")
         if os.path.exists(alleles_file):
             print(f"   Extension failed, but data is available")
@@ -342,68 +164,73 @@ def run_fallback_spacer(sample_name, task_dict, guide_seq, is_extension,
         return False
 
 
-def run_fallback_for_samples(failed_samples, fastq_dict, seq_df, param_df, params, task_df):
-    """
-    Fallback for unsuccessful Prime runs in standard mode
-    """
+def run_fallback_for_samples(failed_samples, fastq_dict, seq_df,
+                             param_df, params, task_df):
     results = []
-    
+
     for task_dict in failed_samples:
         sample_name = task_dict.get("expanded_name")
         guide_id = task_dict.get("guide_id")
-        
+        fallback_name = f"{sample_name}_fallback"
+
         print(f"\n Fallback for {sample_name}")
-        
+
         if cf.is_fallback_sample_done(sample_name):
-            print(f" Already processed")
+            print(f" {sample_name} already processed through fallback")
+
+            if RESULTS_PATH.exists():
+                existing_df = pd.read_csv(RESULTS_PATH)
+                if fallback_name in existing_df["Sample"].values:
+                    print(" Already in results, skipping")
+                    continue
+
             try:
                 res = cf.analyze_fallback_sample(sample_name, task_df, seq_df)
                 if res:
                     results.append(res)
-                continue
+                    cf.update_results_table(res)
+                    print(f"Fallback results updated for {sample_name}")
             except Exception as e:
-                print(f" Error in analysis: {e}")
-        
+                print(f" Error analyzing fallback: {e}")
+            continue
+
         # Getting sequences
         try:
             g = seq_df.set_index("guide_id").loc[guide_id]
         except KeyError:
             print(f" Guide {guide_id} not found")
             continue
-        
+
         spacer = g.get("spacer", "").strip()
         extension = g.get("extension", "").strip()
         amplicon = task_dict.get("amplicon", "")
-        
-        # Processing extension
+
         rev_comp = cf.revcomp(extension)
         processed_extension = cf.project_extension_to_amplicon(amplicon, rev_comp)
-        
-        # Launching extension
+
         success_ext = run_fallback_extension(
             sample_name, task_dict, guide_seq=processed_extension,
             is_extension=True, fastq_dict=fastq_dict,
             seq_df=seq_df, params=params, param_df=param_df
         )
-        
         if not success_ext:
             continue
-        
-        # Launching spacer
+
         run_fallback_spacer(
             sample_name, task_dict, guide_seq=spacer,
             is_extension=False, fastq_dict=fastq_dict,
             seq_df=seq_df, params=params, param_df=param_df
         )
-        
-        # Analysis
+
         try:
             res = cf.analyze_fallback_sample(sample_name, task_df, seq_df)
             if res:
                 results.append(res)
+                cf.update_results_table(res)
+                print(f"Fallback results updated for {sample_name}")
         except Exception as e:
             print(f"Error in fallback analysis: {e}")
-    
+
     return results
 
 
@@ -537,12 +364,12 @@ def run_pipeline(samples_file='samples.csv'):
     
     # Show noise results
     if RESULTS_PATH_NOISE.exists():
-        print(f"\n Noise-результаты сохранены в: {RESULTS_PATH_NOISE}")
+        print(f"\n Noise results saved to: {RESULTS_PATH_NOISE}")
         results_df_noise = pd.read_csv(RESULTS_PATH_NOISE)
-        print(f"   Записей: {len(results_df_noise)}")
-        if not results_df_noise.empty:
-            print(f"\n Первые 5 noise-результатов:")
-            # display(results_df_noise.head())
+        print(f"   Rows: {len(results_df_noise)}")
+        # if not results_df_noise.empty:
+
+        #     # display(results_df_noise.head())
     
     return all_results
 
@@ -662,7 +489,7 @@ def run_noise_post_processing(task_df, seq_df, params):
         module.task_df = task_df
         module.seq_df = seq_df
         
-        # Вызываем функцию
+        
         ne.process_all_samples_annotation(task_df, seq_df)
         print("    Annotation completed")
     except Exception as e:
@@ -702,107 +529,76 @@ def run_noise_post_processing(task_df, seq_df, params):
 #        comparison_df = comparison_df[comparison_df["sample_sum"] > 0.1]
         
         # Cleaning multiple positions
-        clean_df, blacklist = ne.clean_multi_positions(comparison_df)
+        clean_df = ne.clean_multi_positions(comparison_df)
         clean_df.to_csv("outcome/processed/sample_vs_threshold.csv", index=False)
-        
-        # Final processing of reference
-        clean_df = clean_df.groupby(
-            ["sample", "guide", "project", "pos", "threshold", "control_mean", "over_threshold"],
-            as_index=False
-        ).agg({"sample_sum": "sum"})
-        
-        clean_df["adjusted_sum"] = clean_df["sample_sum"] - clean_df["control_mean"]
-#        clean_df = clean_df[clean_df["adjusted_sum"] >= 0.1]
-        
-        # Filtering by frequency in guide
-        ref_adjusted = ne.filter_by_guide_frequency(clean_df, task_df)
-        edit_df_ref = ne.sum_edit_types_per_sample(ref_adjusted)
-        edit_df_ref.to_csv("outcome/processed/reference_edit_types.csv", index=False)
-        
-        print(f"    Reference analysis completed")
+                # Annotate each sample using the threshold table
+        print("\n Step 4: Annotating samples with thresholds...")
+
+        annotation_files = list(ANNOTATION_DIR.glob("*_positions.txt"))
+
+        for annotation_path in annotation_files:
+            try:
+                # getting sample name
+                df_annotation, _, sample_name = ne.load_annotation_file(
+                    annotation_path
+                )
+
+                # adding statuses based on clean_df
+                df_annotated = ne.annotate_with_thresholds(
+                    df_annotation=df_annotation,
+                    df_thresholds=clean_df,
+                    sample_name=sample_name
+                )
+
+                # rewrite annotation
+                df_annotated.to_csv(
+                    annotation_path,
+                    sep="\t",
+                    index=False
+                )
+
+                print(f"    Annotated: {sample_name}")
+
+            except Exception as e:
+                print(
+                    f"    Annotation error for "
+                    f"{annotation_path.name}: {e}"
+                )
+
+        print("    Threshold annotation completed")
+
     except Exception as e:
-        print(f"    Error in reference analysis: {e}")
-        edit_df_ref = pd.DataFrame()
-        blacklist = {}
-    
-    # Checking HDR samples
-    print("\n Step 4: Checking HDR samples...")
-    try:
-        hdr_raw_df, _ = ne.check_HDR_vs_threshold(task_df, noise_df)
-        
-        # Cleaning HDR with consideration of blacklist from reference
-        clean_df_HDR = hdr_raw_df.copy()
-        
-        # Checking if the required functions exist
-        if "ne" in globals() and hasattr(ne, "clean_hdr_positions_with_noise"):
-            clean_df_HDR = ne.clean_hdr_positions_with_noise(
-                clean_df_HDR, blacklist, noise_df, debug=False
-            )
-        
-        clean_df_HDR["adjusted_sum"] = clean_df_HDR["sample_sum"]
-        clean_df_HDR = clean_df_HDR[["sample", "guide", "project", "pos", "adjusted_sum", 
-                                      "control_mean", "threshold", "over_threshold"]]
-        
-        # Filtering HDR
-        if "ne" in globals() and hasattr(ne, "filter_by_guide_frequency"):
-            fi_df_HDR = ne.filter_by_guide_frequency(clean_df_HDR, task_df)
-            edit_df_hdr = ne.sum_edit_types_per_sample(fi_df_HDR)
-            edit_df_hdr.to_csv("outcome/processed/hdr_edit_types.csv", index=False)
-            print(f"   HDR analysis completed")
-        else:
-            edit_df_hdr = pd.DataFrame()
-            print("   Function filter_by_guide_frequency not found")
-    except Exception as e:
-        print(f"   Error in HDR analysis: {e}")
-        edit_df_hdr = pd.DataFrame()
-    
-    # Adjusting results
-    print("\n Step 5: Adjusting results...")
-    try:
-        if not edit_df_ref.empty and not edit_df_hdr.empty:
-            # Using edit_df_hdr for adjustment
-            final_adjusted = ne.adjust_corrections(
-                edit_df=edit_df_hdr,
-                results_df=pd.read_csv(RESULTS_PATH_NOISE)
-            )
-        elif not edit_df_ref.empty:
-            # If there is no HDR, use reference
-            final_adjusted = ne.adjust_corrections(
-                edit_df=edit_df_ref,
-                results_df=pd.read_csv(RESULTS_PATH_NOISE)
-            )
-        else:
-            print("  No data available for adjustment")
-            final_adjusted = pd.DataFrame()
-        
-        if not final_adjusted.empty:
-            final_adjusted.to_csv("outcome/processed/adjusted_corrections.csv", index=False)
-            print(f"   Adjustment completed")
-    except Exception as e:
-        print(f"   Error in adjustment: {e}")
-        final_adjusted = pd.DataFrame()
-    
-    # --- Step 6: Final summary ---
-    print("\n Step 6: Building final summary...")
-    try:
-        if "ne" in globals() and hasattr(ne, "build_final_summary"):
-            final_summary = ne.build_final_summary(
-                final_adjusted=final_adjusted,
-                results_df=pd.read_csv(RESULTS_PATH_NOISE),
-                ref_adjusted=edit_df_ref,
-                task_df=task_df,
-                info_projects_without_noise=projects_without_noise
-            )
-            final_summary.to_csv("outcome/final_summary_noise.csv", index=False)
-            print(f"  Final summary saved")
-            # display(final_summary.head())
-        else:
-            print("   Function build_final_summary not found")
-    except Exception as e:
-        print(f" Error in final summary: {e}")
-    
+        print(f"    Error checking samples against thresholds: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Build the final noise summary
+    print("\n Step 5: Building noise summary...")
 
     results_df = pd.read_csv(RESULTS_PATH_NOISE)
+
+    # === step 5 in run_noise_post_processing ===
+    print("\n Step 5: Building noise summary...")
+    results_df = pd.read_csv(RESULTS_PATH_NOISE)
+    
+    # projects without controls 
+    final_summary_df = ne.build_noise_summary(
+        annotation_dir=ANNOTATION_DIR,
+        results_df=results_df,
+        task_df=task_df,
+        info_projects_without_noise=projects_without_noise
+    )
+    
+    summary_path = "outcome/noise_summary.csv"
+    final_summary_df.to_csv(
+        summary_path,
+        index=False
+    )
+    print(
+        f"    Noise summary saved: {summary_path} "
+        f"({len(final_summary_df)} samples)"
+    )
+
     # --- Step 7: Processing Base editors ---
     base_tasks = task_df[task_df['edit_mode'] == 'base']
     if not base_tasks.empty:
@@ -829,7 +625,7 @@ def run_noise_post_processing(task_df, seq_df, params):
         )
         
         print(base_table.head())
-        print("\n DEBUG: Проверка comparison_df перед build_base_reports")
+        print("\n DEBUG: Checking comparison_df before build_base_reports")
         print(f"   comparison_df type: {type(comparison_df)}")
         print(f"   comparison_df shape: {comparison_df.shape if hasattr(comparison_df, 'shape') else 'N/A'}")
         if hasattr(comparison_df, 'columns'):
@@ -922,7 +718,11 @@ def process_single_annotation(alleles_file, task_df, seq_df, results_df):
     
     # Sorting and saving
     df = df.sort_values(by="%Reads", ascending=False)
-    
+    df = ne.annotate_hdr_window(
+        df=df,
+        amplicon=amplicon,
+        expected=expected,
+    )
     out_path = Path("outcome/annotation") / f"{base_with_fallback}_positions.txt"
     df.to_csv(out_path, sep="\t", index=False)
     print(f" Saved {out_path}")
@@ -951,7 +751,7 @@ def run_cas9_base_noise(tasks, fastq_dict, seq_df, params, param_df):
                     results.append(res)
                 continue
             except Exception as e:
-                print(f"⚠ Ошибка анализа: {e}")
+                print(f"Analysis error: {e}")
         
         # cas9 mode for base 
         if task_dict["edit_mode"].lower() == "base":
@@ -963,7 +763,7 @@ def run_cas9_base_noise(tasks, fastq_dict, seq_df, params, param_df):
                 task=task_dict,
                 seq_df=seq_df,
                 params=params,
-                param_df=param_df,  # ← добавить
+                param_df=param_df,  
                 fastq_dict=fastq_dict
             )
         except Exception as e:
@@ -1075,7 +875,7 @@ def generate_samples_template():
         "group": "",
         "edit_mode": "",
         "project": "",
-        "noise": "no"  # по умолчанию стандартный режим
+        "noise": "no"  
     })
     
     df.to_csv("samples.csv", index=False)
@@ -1086,8 +886,8 @@ def generate_samples_template():
     print("   - guide_id: guide ID from sequences.csv")
     print("   - group: 0 for controls, 1/2/3 for samples")
     print("   - edit_mode: cas9 / base / prime")
-    print("   - project: ID проекта из sequences.csv")
-    print("   - noise: no - стандартный режим, yes - noise-режим")
+    print("   - project: ID from sequences.csv")
+    print("   - noise: no - standard, yes - noise")
     
     return df
 
@@ -1103,11 +903,11 @@ def quick_check_samples(samples_file='samples.csv'):
     print(f" {samples_file}:")
     # display(df)
     
-    print("\n Проверка заполненности:")
+    print("\n Checking:")
     for col in df.columns:
         empty = df[col].isna().sum() + (df[col] == '').sum()
         filled = len(df) - empty
-        # print(f"   {col}: {filled}/{len(df)} заполнено {status}")
+
    
     print(f"\n   noise = yes: {len(df[df['noise'] == 'yes'])}")
     print(f"   noise = no: {len(df[df['noise'] == 'no'])}")
