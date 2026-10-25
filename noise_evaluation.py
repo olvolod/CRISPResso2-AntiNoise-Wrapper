@@ -1029,15 +1029,23 @@ def build_noise_model(control_table, ci_level=0.95):
                 )
 
                 threshold = ci_up * 100
-                
+        # Lower bound 
+        if n_controls <= 2:
+            lower_bound = beta.ppf(0.05, alpha_post, beta_post) * 100
+        else:
+            ci_low, ci_up = proportion_confint(k_total, n_total, alpha=0.05, method="beta")
+            lower_bound = ci_low * 100
+
         thresholds.append({
             "project": project,
             "guide": guide,
             "pos": pos,
             "control_mean": noise_mean * 100,
             "threshold": threshold,
+            "lower_bound": lower_bound,  
             "n_controls": n_controls
-        })
+        })                
+
 
     return pd.DataFrame(thresholds)
 def check_samples_vs_threshold(task_df, noise_df):
@@ -1101,9 +1109,7 @@ def check_samples_vs_threshold(task_df, noise_df):
 
         # merging with noise (adding mean control and threshold)
         merged = pos_sums.merge(
-            noise_subset[["pos", "control_mean", "threshold"]], #noise_subset[["pos", "sum", "threshold"]],
-            # left_on="pos_type",
-            # right_
+            noise_subset[["pos", "control_mean", "threshold", "lower_bound"]],  # ← добавить
             on="pos",
             how="left"
         )
@@ -1123,7 +1129,7 @@ def check_samples_vs_threshold(task_df, noise_df):
               merged["over_threshold"].sum())
 
         # constructing result
-        for _, row in merged.iterrows():
+        for _, row in merged.iterrows():           
             results.append({
                 "sample": sample_name,
                 "guide": guide,
@@ -1133,7 +1139,7 @@ def check_samples_vs_threshold(task_df, noise_df):
                 "sample_sum": row["sample_sum"],
                 "control_mean": row["control_mean"],
                 "threshold": row["threshold"],
-                # "control_mean": row ["control_mean"],
+                "lower_bound": row.get("lower_bound", 0),
                 "over_threshold": "yes" if row["over_threshold"] else "no"
             })
 
@@ -1534,70 +1540,88 @@ def check_HDR_vs_threshold(task_df, noise_df):
 
     return final_df, no_noise_samples
 
-def annotate_with_thresholds(df_annotation, df_thresholds, sample_name):
+def annotate_with_thresholds(df_annotation, df_thresholds, sample_name, depth=None):
     """
-    Table 2 is annotated with the results from the threshold model presented in Table 1.
-    Events labeled 'change' are automatically marked as 'yes_change'.
-    All other events are cross-referenced against the positions that exceeded the threshold.
+
     """
     import pandas as pd
 
     df_annotation = df_annotation.copy()
 
-    # Normalize name
     sample_name = str(sample_name).replace("_fallback", "").strip()
 
     threshold_samples = df_thresholds["sample"].astype(str).str.strip()
-    threshold_samples = threshold_samples.str.replace(
-        "_fallback", "", regex=False
-    )
+    threshold_samples = threshold_samples.str.replace("_fallback", "", regex=False)
 
     sample_thresh = df_thresholds[
         (threshold_samples == sample_name)
-        & (
-            df_thresholds["over_threshold"]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            == "yes"
-        )
+        & (df_thresholds["over_threshold"].astype(str).str.strip().str.lower() == "yes")
     ]
 
-    yes_positions = set(
-        sample_thresh["pos"].dropna().astype(str).str.strip()
-    )
+    yes_positions = set(sample_thresh["pos"].dropna().astype(str).str.strip())
 
+    #  pos -> control_mean
+
+    lower_bound_map = dict(zip(
+        sample_thresh["pos"].astype(str).str.strip(),
+        pd.to_numeric(sample_thresh["lower_bound"], errors="coerce").fillna(0)
+    ))
     def process_pos_type(pos_type_val):
         if pd.isna(pos_type_val) or str(pos_type_val).strip() == "":
             return ""
-
-        events = [
-            event.strip()
-            for event in str(pos_type_val).split(";")
-            if event.strip()
-        ]
-
+        events = [e.strip() for e in str(pos_type_val).split(";") if e.strip()]
         status_list = []
-
         for event in events:
             if "change" in event.lower():
                 status_list.append("yes_change")
                 continue
-
             if event in yes_positions:
                 if event.startswith(("del", "ins")):
                     status_list.append("yes_indel")
                 elif event.startswith("mut"):
                     status_list.append("yes_mut")
-
-
         unique_statuses = list(dict.fromkeys(status_list))
-
         return ";".join(unique_statuses) if unique_statuses else "no"
 
-    df_annotation["over_threshold"] = (
-        df_annotation["pos_type"].apply(process_pos_type)
-    )
+    df_annotation["over_threshold"] = df_annotation["pos_type"].apply(process_pos_type)
+
+    def subtract_control(row):
+
+        ref_name = str(row.get("Reference_Name", "")).strip()
+        if ref_name in ("HDR", "Prime-edited"):
+            return row
+
+        statuses = str(row["over_threshold"]).split(";")
+
+        if not any(s in ("yes_indel", "yes_mut") for s in statuses):
+            return row
+
+        positions = [p.strip() for p in str(row["pos_type"]).split(";") if p.strip()]
+        cms = []
+        for pos in positions:
+            if pos.startswith(("ins", "del", "mut")):
+                lb = lower_bound_map.get(pos)
+                if lb is not None and lb > 0:
+                    cms.append(float(lb))
+
+        if not cms:
+            return row
+
+        max_lb = max(cms)
+        old_pct = float(row.get("%Reads", 0) or 0)
+        new_pct = max(0.0, old_pct - max_lb)
+        row["%Reads"] = new_pct
+        if depth is not None and depth > 0:
+            row["#Reads"] = int(round(new_pct * depth / 100))
+        row["control_mean_used"] = max_lb
+
+        # If 0 -> over_threshold = 'no'
+        if new_pct == 0.0:
+            row["over_threshold"] = "no"
+
+        return row
+
+    df_annotation = df_annotation.apply(subtract_control, axis=1)
 
     return df_annotation
 
