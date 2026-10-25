@@ -65,7 +65,7 @@ def load_tables():
     samp_df = pd.read_csv("samples.csv", sep=None, engine="python",
                           dtype=str, keep_default_na=False)
 
-    # --- базовый словарь (без additional) ---
+    # --- basic dict (without additional) ---
     base_params = {
         row["parameters"].strip(): row["values"
             ].strip()
@@ -131,7 +131,7 @@ def expand_samples(samp_df, seq_df):
             for gid in guide_ids:
                 t = base.copy()
                 t["guide_id"] = gid
-                t["expanded_name"] = f"{row['sample_name']}__g{int(gid)}"
+                t["expanded_name"] = f"{row['sample_name']}_g{int(gid)}"
                 tasks.append(t)
 
         # regular samples
