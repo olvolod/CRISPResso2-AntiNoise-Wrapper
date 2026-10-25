@@ -9,7 +9,7 @@ from config import ANNOTATION_DIR
 import crispresso_functions as cf
 # post-processing functions 
 # annotation
-def load_alleles_table(path): #для всех таблиц из папки с таблицами
+def load_alleles_table(path): 
     df = pd.read_csv(path, sep="\t")
     return df
 
@@ -17,7 +17,7 @@ def filter_alleles(df):
     df = df.copy()
     hdr_mask = df["Reference_Name"].isin(["HDR", "Prime-edited"]) & \
                (df["Read_Status"] == "MODIFIED") 
-               # (df['%Reads'] > 0.01)
+
     ref_mask = ~hdr_mask
     mut_mask = (ref_mask & (df["n_mutated"] > 0))
     ins_mask = (
@@ -119,6 +119,116 @@ def extract_variants_with_mapping(
 
     return variants
 
+
+def annotate_hdr_window(
+    df,
+    amplicon,
+    expected,
+    hdr_name="HDR",
+):
+    import pandas as pd
+    import crispresso_functions as cf
+
+    df = df.copy()
+
+    # 1. Aligning hdr ref and ref
+    aln_amp, aln_hdr = cf.align_expected_to_amplicon(
+        amplicon, expected
+    )
+
+    # reference difference range
+    diff_cols = [
+        i for i, (a, h) in enumerate(zip(aln_amp, aln_hdr))
+        if a != h
+    ]
+
+    if not diff_cols:
+        return df
+
+    first_col, last_col = diff_cols[0], diff_cols[-1]
+
+    # 2. window range to hdr coordinates.
+    hdr_pos = 0
+    start_hdr = end_hdr = None
+
+    for i, (a, h) in enumerate(zip(aln_amp, aln_hdr)):
+        if h != "-":
+            hdr_pos += 1
+
+        if i == first_col:
+            start_hdr = hdr_pos if h != "-" else hdr_pos + 1
+
+        if i == last_col:
+            end_hdr = hdr_pos
+
+    
+    start_hdr = max(1, start_hdr)
+    end_hdr = max(start_hdr, end_hdr)
+
+    # 3. HDR mapping.
+    hdr_to_amp = {}
+    amp_pos = 0
+    hdr_pos = 0
+
+    for a, h in zip(aln_amp, aln_hdr):
+        if a != "-":
+            amp_pos += 1
+        if h != "-":
+            hdr_pos += 1
+            hdr_to_amp[hdr_pos] = amp_pos
+
+    # 4. every hdr row recalculation
+
+    for idx in df.index[df["Reference_Name"] == hdr_name]:
+        read = df.at[idx, "Aligned_Sequence"]
+        ref = df.at[idx, "Reference_Sequence"]
+
+        changes = []
+        positions = []
+        ref_pos = 0
+
+        for r, h in zip(read, ref):
+            if h != "-":
+                ref_pos += 1
+
+
+            in_window = start_hdr <= ref_pos <= end_hdr
+
+            if h == r:
+                continue
+
+            
+            if h == "-" and r != "-":
+                anchor = hdr_to_amp.get(ref_pos)
+                if anchor is None:
+                    anchor = hdr_to_amp.get(ref_pos + 1)
+                if anchor is not None and (
+                    start_hdr - 1 <= ref_pos <= end_hdr
+                ):
+                    changes.append(f"ins{r}")
+                    positions.append(f"ins{anchor}change")
+                continue
+
+            if not in_window:
+                continue
+
+            pos = hdr_to_amp.get(ref_pos)
+            if pos is None:
+                continue
+
+            if h != "-" and r == "-":
+                changes.append(f"del{h}")
+                positions.append(f"del{pos}change")
+
+            elif h != "-" and r != "-":
+                changes.append(f"{h}>{r}")
+                positions.append(f"mut{pos}change")
+        if changes:
+            df.at[idx, "change"] = ";".join(changes)
+            df.at[idx, "pos_type"] = ";".join(positions)
+
+    return df
+
 def annotate_window_variants_stat(
     df,
     positions,
@@ -140,14 +250,9 @@ def annotate_window_variants_stat(
                 hdr_to_amp_map=hdr_map
             )
         
-            variants = mark_expected_changes(
-                variants,
-                row,
-                expected_changes,
-                hdr_map
-            )
 
-        # Reference
+
+        #Reference
         else:
 
             variants = extract_variants_with_mapping(
@@ -173,66 +278,7 @@ def annotate_window_variants_stat(
 
     return df.apply(process_row, axis=1)
 
-def mark_expected_changes(
-    variants,
-    row,
-    expected_changes,
-    hdr_map
-):
 
-    if not expected_changes or not hdr_map:
-        return variants
-
-    # making several expected positions in amplicon coordinates
-    expected_amp_positions = {}
-
-    for ch in expected_changes:
-        amp_pos = hdr_map.get(ch["pos"])
-        if amp_pos:
-            expected_amp_positions[amp_pos] = ch
-
-    aligned_read = row["Aligned_Sequence"]
-    aligned_ref = row["Reference_Sequence"]
-
-    new_variants = []
-
-    for v in variants:
-
-        pos = int("".join(filter(str.isdigit, v["pos_type"])))
-
-        if pos not in expected_amp_positions:
-            new_variants.append(v)
-            continue
-
-        expected_ch = expected_amp_positions[pos]
-
-        # checking in aligned
-        ref_pos = 0
-
-        for r, a in zip(aligned_ref, aligned_read):
-
-            if r != "-":
-                ref_pos += 1
-
-            if ref_pos == pos:
-
-                if expected_ch["type"] == "mut":
-                    if a != expected_ch["alt"]:
-                        v["pos_type"] = v["pos_type"] + "change"
-
-                elif expected_ch["type"] == "del":
-                    if a != "-":
-                        v["pos_type"] = v["pos_type"] + "change"
-
-                elif expected_ch["type"] == "ins":
-                    if a != expected_ch["alt"]:
-                        v["pos_type"] = v["pos_type"] + "change"
-
-                break
-
-        new_variants.append(v)
-
-    return new_variants
 
 def detect_expected_changes(aln_amp, aln_exp): 
     changes = []
@@ -305,6 +351,62 @@ def find_all_occurrences(seq, sub):
         starts.append(idx)
         start = idx + 1
     return starts
+
+def get_annotated_range(df_filled):
+    """Extracts a numerical range of positions from the pos_type of populated rows"""
+    positions = set()
+    for pos_str in df_filled["pos_type"].dropna():
+        s = str(pos_str).strip()
+        if not s:
+            continue
+        for part in s.split(";"):
+            nums = re.findall(r"\d+", part)
+            if nums:
+                positions.add(int(nums[0]))
+    if not positions:
+        return None
+    return (min(positions), max(positions))
+
+
+def classify_range(annotated_range, ext_range, spacer_range):
+    """Determines which window the annotated range belongs to"""
+    if annotated_range is None:
+        return None
+    ann_set = set(range(annotated_range[0], annotated_range[1] + 1))
+    ext_set = set(ext_range) if ext_range else set()
+    spacer_set = set(spacer_range) if spacer_range else set()
+    ext_ov = len(ann_set & ext_set)
+    spc_ov = len(ann_set & spacer_set)
+    if ext_ov == 0 and spc_ov == 0:
+        return None
+    if ext_ov > spc_ov:
+        return "extension"
+    if spc_ov > ext_ov:
+        return "spacer"
+    return None
+
+
+def find_window_by_modified_reads(amplicon, window_seq, df_subset):
+    """Finds the window_seq position in the amplicon where ALL rows in df_subset show a difference from the reference."""
+    candidates = find_all_occurrences(amplicon, window_seq)
+    if not candidates or df_subset.empty:
+        return None
+    for start in candidates:
+        positions = list(range(start + 1, start + 1 + len(window_seq)))
+        all_have = True
+        for _, row in df_subset.iterrows():
+            variants = cf.extract_variants_at_positions(
+                row["Aligned_Sequence"],
+                row["Reference_Sequence"],
+                positions
+            )
+            if not variants:
+                all_have = False
+                break
+        if all_have:
+            return positions
+    return None
+
 def split_window_into_chunks(window, reference, min_len=6):
     chunks = []
     i = 0
@@ -324,15 +426,15 @@ def split_window_into_chunks(window, reference, min_len=6):
     return chunks
 def normalize_window_chunks(chunks, window_len):
     if len(chunks) != 2:
-        return chunks  # ничего не делаем
+        return chunks  
 
     c1, c2 = chunks
 
     if (len(c1) + len(c2)) != window_len:
-        return chunks  # странный случай, не трогаем
+        return chunks  
 
     if len(c1) % 2 != 0:
-        # перенос последнего nt из c1 в начало c2
+
         c2 = c1[-1] + c2
         c1 = c1[:-1]
 
@@ -451,7 +553,7 @@ def collapse_positions(pos_string):
 
         nums = sorted(set(nums))
 
-        # группируем подряд идущие
+        
         ranges = []
         start = nums[0]
         prev = nums[0]
@@ -496,7 +598,7 @@ def process_all_samples_annotation(task_df, seq_df):
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Загружаем results один раз
+    # loading results once
     
     results_df = pd.read_csv(results_path)
 
@@ -619,6 +721,112 @@ def process_all_samples_annotation(task_df, seq_df):
             by="%Reads",
             ascending=False
         )
+        df = annotate_hdr_window(
+            df=df,
+            amplicon=amplicon,
+            expected=expected,
+        )
+
+        # 10.1 checking empty rows
+        empty_mask = (
+            df["pos_type"].isna() |
+            (df["pos_type"].astype(str).str.strip() == "")
+        )
+
+        if empty_mask.any():
+            n_empty = int(empty_mask.sum())
+            print(f"⚠ Found {n_empty} rows with empty pos_type")
+            
+            filled_df = df.loc[~empty_mask]
+            empty_df = df.loc[empty_mask].copy()
+            
+            # already annotated
+            annotated_range = get_annotated_range(filled_df)
+            
+            # real windows of spacer и extension from CRISPResso report
+            try:
+                ext_qwin = cf.get_quant_window(base_without_fallback, "extension")
+                spacer_qwin = cf.get_quant_window(base_without_fallback, "spacer")
+            except Exception as e:
+                print(f"   Could not get spacer/extension windows: {e}")
+                ext_qwin = spacer_qwin = None
+            
+            ext_range = None
+            spacer_range = None
+            if ext_qwin:
+                s = amplicon.find(ext_qwin)
+                if s != -1:
+                    ext_range = list(range(s + 1, s + 1 + len(ext_qwin)))
+            if spacer_qwin:
+                s = amplicon.find(spacer_qwin)
+                if s != -1:
+                    spacer_range = list(range(s + 1, s + 1 + len(spacer_qwin)))
+            
+            if annotated_range:
+                print(f"   Annotated range: {annotated_range[0]}-{annotated_range[1]}")
+            if ext_range:
+                print(f"   Extension range: {ext_range[0]}-{ext_range[-1]} (len={len(ext_range)})")
+            if spacer_range:
+                print(f"   Spacer range: {spacer_range[0]}-{spacer_range[-1]} (len={len(spacer_range)})")
+            
+            annotated_category = classify_range(annotated_range, ext_range, spacer_range)
+            print(f"   Annotated category: {annotated_category}")
+            
+            # what window to realign
+            target_window = None
+            target_name = None
+            if annotated_category == "spacer" and ext_qwin:
+                target_window, target_name = ext_qwin, "extension"
+            elif annotated_category == "extension" and spacer_qwin:
+                target_window, target_name = spacer_qwin, "spacer"
+            elif annotated_category is None:
+                target_window = ext_qwin or spacer_qwin
+                target_name = "extension" if ext_qwin else "spacer"
+            
+            if target_window:
+                print(f"   Trying to realign to {target_name} window '{target_window}'")
+                new_positions = find_window_by_modified_reads(amplicon, target_window, empty_df)
+                
+                if new_positions:
+                    print(f"   ✓ Realigned to positions {new_positions[0]}-{new_positions[-1]}")
+                    
+                    hdr_mask_empty = empty_df["Reference_Name"].isin(["HDR", "Prime-edited"])
+                    ref_mask_empty = ~hdr_mask_empty
+                    parts = []
+                    
+                    if hdr_mask_empty.any() and hdr_map is not None:
+                        hdr_ann = annotate_window_variants_stat(
+                            df=empty_df[hdr_mask_empty].copy(),
+                            positions=new_positions,
+                            hdr_map=hdr_map,
+                            expected_changes=expected_changes
+                        )
+                        parts.append(hdr_ann)
+                    
+                    if ref_mask_empty.any():
+                        ref_ann = annotate_window_variants_stat(
+                            df=empty_df[ref_mask_empty].copy(),
+                            positions=new_positions,
+                            hdr_map=None,
+                            expected_changes=None
+                        )
+                        parts.append(ref_ann)
+                    
+                    if parts:
+                        reann_df = pd.concat(parts, ignore_index=False)
+                        df = pd.concat([filled_df, reann_df], ignore_index=False)
+                        df["pos_type"] = df["pos_type"].apply(collapse_positions)
+                        
+                        still_empty = (
+                            df["pos_type"].isna() |
+                            (df["pos_type"].astype(str).str.strip() == "")
+                        ).sum()
+                        print(f"   After realignment: {still_empty} rows still empty")
+                else:
+                    print(f"   ⚠ No {target_name} window position where ALL {n_empty} empty reads have variants")
+                    print(f"      Consider increasing --prime_editing_pegRNA_extension_quantification_window_size")
+            else:
+                print(f"   Could not determine target window for realignment")
 
         # 11. Saving
         out_path = output_dir / f"{base_with_fallback}_positions.txt"
@@ -631,7 +839,7 @@ def process_all_samples_annotation(task_df, seq_df):
 
         print(f"✔ Saved {out_path}")
 
-#логика reference
+#reference
 def load_annotation_file(path):
     """
     Downloads annotation file and returns:
@@ -642,13 +850,13 @@ def load_annotation_file(path):
 
     print(f"\n Loading file: {path.name}")
 
-    # имя без _positions.txt
+    # name without _positions.txt
     file_prefix = path.stem.replace("_positions", "")
 
-    # имя для сохранения (убираем _fallback если есть)
+    # name to save (delete _fallback)
     sample_name_for_task = file_prefix.replace("_fallback", "")
 
-    # имя для output (оставляем fallback если есть)
+    # output name (leaving fallback)
     sample_name_for_output = file_prefix
 
     df = pd.read_csv(path, sep="\t")
@@ -776,7 +984,7 @@ def build_noise_model(control_table, ci_level=0.95):
         k_total = df_pos["#reads"].sum()
         n_total = df_pos["depth"].sum()
 
-        #  n = 1 or 2 → Bayesian
+        #  n = 1 or 2  Bayesian
 
         if n_controls <= 2:
 
@@ -804,7 +1012,7 @@ def build_noise_model(control_table, ci_level=0.95):
                     beta_post
                 ) * 100
 
-        #  n ≥ 3 → Binomial CI (Clopper-Pearson)
+        #  n more than 3  Binomial CI (Clopper-Pearson)
 
         else:
 
@@ -841,7 +1049,7 @@ def check_samples_vs_threshold(task_df, noise_df):
     - compare with threshold
     """
 
-    print("\n🟢 Checking samples vs threshold")
+    print("\n Checking samples vs threshold")
 
     results = []
 
@@ -876,7 +1084,7 @@ def check_samples_vs_threshold(task_df, noise_df):
         df, _, _ = load_annotation_file(matches[0])
 
         # remove HDR / Prime
-        df = df[~df["Reference_Name"].isin(["HDR", "Prime-edited"])].copy()
+        # df = df[~df["Reference_Name"].isin(["HDR", "Prime-edited"])].copy()
         #explode
         df["pos"] = df["pos_type"].str.split(";")
         df = df.explode("pos")
@@ -935,10 +1143,7 @@ def check_samples_vs_threshold(task_df, noise_df):
 
     return final_df
 def filter_by_guide_frequency(variants_df, meta_df):
-    """
-    variants_df — первая таблица (с pos)
-    meta_df — таблица с guide_id
-    """
+
 
     # merging
     df = variants_df.merge(
@@ -968,7 +1173,7 @@ def filter_by_guide_frequency(variants_df, meta_df):
 
     # 4 applying filtering rule
     filtered_df = df[
-        (df["n_samples"] == 1) |        # if sample  → keep
+        (df["n_samples"] == 1) |        # if sample   keep
         (df["pos_sample_count"] >= 2)   # if >=2 samples have the variant
     ].copy()
 
@@ -982,10 +1187,10 @@ def filter_by_guide_frequency(variants_df, meta_df):
 def sum_edit_types_per_sample(df):
     df = df.copy()
 
-    # 1 определяем тип
+    # 1 type
     df["edit_type"] = df["pos"].str.extract(r"^(del|ins|mut)")
 
-    # 2 суммируем
+    # 2 summ
     result = (
         df.groupby(["sample", "edit_type"])["adjusted_sum"]
         .sum()
@@ -993,7 +1198,7 @@ def sum_edit_types_per_sample(df):
         .reset_index()
     )
 
-    # гарантируем наличие всех колонок
+    # all columns
     for col in ["del", "ins", "mut"]:
         if col not in result.columns:
             result[col] = 0
@@ -1002,9 +1207,6 @@ def sum_edit_types_per_sample(df):
 
     return result
 def clean_multi_positions(df):
-    """
-    df — таблица после threshold фильтра
-    """
 
     df = df.copy()
 
@@ -1012,7 +1214,7 @@ def clean_multi_positions(df):
     samples = df["sample"].unique()
 
     cleaned_frames = []
-    blacklist_dict = {}   # ← here goes no_list
+    blacklist_dict = {}   #  here goes no_list
     
     for sample in samples:
 
@@ -1052,17 +1254,17 @@ def clean_multi_positions(df):
             # deleting elements that are in no_list
             filtered = [p for p in parts if p not in no_list]
 
-            # if after filtering nothing is left → skip
+            # if after filtering nothing is left  skip
             if len(filtered) == 0:
                 continue
 
-            # if one element is left → sum to it
+            # if one element is left  sum to it
             if len(filtered) == 1:
                 row["pos"] = filtered[0]
                 updated_rows.append(row)
                 continue
 
-            # if several elements are left → join them back
+            # if several elements are left  join them back
             row["pos"] = ";".join(filtered)
             updated_rows.append(row)
 
@@ -1072,7 +1274,170 @@ def clean_multi_positions(df):
 
     final_df = pd.concat(cleaned_frames, ignore_index=True)
 
-    return final_df, blacklist_dict
+    return final_df
+
+def build_noise_summary(
+    annotation_dir, 
+    results_df, 
+    task_df, 
+    info_projects_without_noise
+):
+    """
+    Compiles the final noise evaluation table.
+    Columns:
+    sample, correction, p_correction_%, i_correction_%,
+    indel_%, mutation_%, guide, group
+    Excludes controls (group == "0") and projects that lack a noise model.
+    """
+    import pandas as pd
+    from pathlib import Path
+
+    annotation_dir = Path(annotation_dir)
+    output_rows = []
+    required_results = {"Sample", "correction_%", "Reads"}
+    missing = required_results - set(results_df.columns)
+    if missing:
+        raise ValueError(
+            f"No noise_results columns: {sorted(missing)}"
+        )
+        
+    results_df = results_df.copy()
+    results_df["Sample"] = results_df["Sample"].astype(str).str.strip()
+    
+    # preparing name for merge with task_df
+    results_df["sample_clean"] = results_df["Sample"].str.replace("_fallback", "", regex=False)
+    
+    # guides, groups, projects info
+    merged_results = results_df.merge(
+        task_df[["expanded_name", "project", "guide_id", "group"]],
+        left_on="sample_clean",
+        right_on="expanded_name",
+        how="left"
+    )
+
+    for annotation_path in sorted(annotation_dir.glob("*_positions.txt")):
+        sample_name = annotation_path.stem.replace("_positions", "")
+        sample_clean = sample_name.replace("_fallback", "")
+        
+        # row in merged df
+        result_row = merged_results[merged_results["Sample"] == sample_name]
+        if result_row.empty:
+            result_row = merged_results[merged_results["sample_clean"] == sample_clean]
+            
+        if result_row.empty:
+            print(f"{sample_name} is missing in noise_results")
+            continue
+            
+        result_row = result_row.iloc[0]
+        
+        # === CRITICAL FILTER: Pass through controls and samples without noise processing ===
+        project = str(result_row.get("project", ""))
+        group = str(result_row.get("group", ""))
+        guide = result_row.get("guide_id", "N/A")
+        
+        is_control = group == "0"
+        no_noise = project in info_projects_without_noise
+        
+        if is_control or no_noise:
+            # Ignore these lines completely; they will not be included in the final version. summary
+            continue
+
+        # Reading the local annotation of positions
+        try:
+            annotation_df = pd.read_csv(annotation_path, sep="\t")
+        except Exception as exc:
+            print(f"Could not read {annotation_path.name}: {exc}")
+            continue
+            
+        if annotation_df.empty:
+            print(f"Empty annotation: {annotation_path.name}")
+            continue
+
+        required_annotation = {"Reference_Name", "over_threshold"}
+        missing_annotation = required_annotation - set(annotation_df.columns)
+        if missing_annotation:
+            print(f"Skipping {annotation_path.name}: no columns {sorted(missing_annotation)}")
+            continue
+
+        reads_col = next((col for col in ["#Reads", "Reads", "reads"] if col in annotation_df.columns), None)
+        if reads_col is None:
+            print(f"Skipping {annotation_path.name}: no column with reads")
+            continue
+
+        annotation_df[reads_col] = pd.to_numeric(annotation_df[reads_col], errors="coerce").fillna(0)
+        annotation_df["Reference_Name"] = annotation_df["Reference_Name"].astype(str).str.strip()
+
+        def parse_status(value):
+            if pd.isna(value):
+                return set()
+            return {status.strip() for status in str(value).split(";") if status.strip()}
+            
+        annotation_df["_statuses"] = annotation_df["over_threshold"].apply(parse_status)
+
+        # HDR 
+        hdr_df = annotation_df[annotation_df["Reference_Name"].str.upper() == "HDR"]
+        imperfect_reads = 0
+        for _, row in hdr_df.iterrows():
+            statuses = row["_statuses"]
+            reads = row[reads_col]
+            if "yes_change" in statuses or "yes_indel" in statuses or "yes_mut" in statuses:
+                imperfect_reads += reads
+
+        # Reference 
+        ref_df = annotation_df[annotation_df["Reference_Name"].str.upper() == "REFERENCE"]
+        indel_reads = 0
+        mut_reads = 0
+        for _, row in ref_df.iterrows():
+            statuses = row["_statuses"]
+            reads = row[reads_col]
+            if "yes_indel" in statuses:
+                indel_reads += reads
+            elif "yes_mut" in statuses:
+                mut_reads += reads
+
+        # metrics
+        total_reads = pd.to_numeric(pd.Series([result_row["Reads"]]), errors="coerce").iloc[0]
+        correction = pd.to_numeric(pd.Series([result_row["correction_%"]]), errors="coerce").iloc[0]
+
+        if pd.isna(total_reads) or total_reads <= 0:
+            print(f"Incorrect value Reads for {sample_name}")
+            continue
+            
+        if pd.isna(correction):
+            correction = 0.0
+
+        i_correction_pct = imperfect_reads / total_reads * 100
+        p_correction_pct = max(0.0, correction - i_correction_pct)
+        indel_pct = indel_reads / total_reads * 100
+        mutation_pct = mut_reads / total_reads * 100
+        undesired_pct = indel_pct+mutation_pct
+
+        output_rows.append({
+            "sample": sample_clean,  
+            "correction": round(float(correction), 2),
+            "p_correction_%": round(p_correction_pct, 2),
+            "i_correction_%": round(i_correction_pct, 2),
+            "undesired_%": round(undesired_pct, 2),
+            "indel_%": round(indel_pct, 2),
+            "mutation_%": round(mutation_pct, 2),
+            "guide": guide,
+            "group": group
+        })
+
+    return pd.DataFrame(
+        output_rows,
+        columns=[
+            "sample",
+            "correction",
+            "p_correction_%",
+            "i_correction_%",
+            "undesired_%",
+            "indel_%",
+            "mutation_%",
+            "guide",
+            "group"
+        ],
+    )
 
 #HDR logic imperfect
 def check_HDR_vs_threshold(task_df, noise_df):
@@ -1099,7 +1464,7 @@ def check_HDR_vs_threshold(task_df, noise_df):
         guide = sample_row["guide_id"]
         group = sample_row["group"]
 
-        print(f"\n➡ Sample: {sample_name}")
+        print(f"\n Sample: {sample_name}")
         print(f"   Project: {project} | Guide: {guide}")
 
         noise_subset = noise_df[
@@ -1169,6 +1534,74 @@ def check_HDR_vs_threshold(task_df, noise_df):
 
     return final_df, no_noise_samples
 
+def annotate_with_thresholds(df_annotation, df_thresholds, sample_name):
+    """
+    Table 2 is annotated with the results from the threshold model presented in Table 1.
+    Events labeled 'change' are automatically marked as 'yes_change'.
+    All other events are cross-referenced against the positions that exceeded the threshold.
+    """
+    import pandas as pd
+
+    df_annotation = df_annotation.copy()
+
+    # Normalize name
+    sample_name = str(sample_name).replace("_fallback", "").strip()
+
+    threshold_samples = df_thresholds["sample"].astype(str).str.strip()
+    threshold_samples = threshold_samples.str.replace(
+        "_fallback", "", regex=False
+    )
+
+    sample_thresh = df_thresholds[
+        (threshold_samples == sample_name)
+        & (
+            df_thresholds["over_threshold"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            == "yes"
+        )
+    ]
+
+    yes_positions = set(
+        sample_thresh["pos"].dropna().astype(str).str.strip()
+    )
+
+    def process_pos_type(pos_type_val):
+        if pd.isna(pos_type_val) or str(pos_type_val).strip() == "":
+            return ""
+
+        events = [
+            event.strip()
+            for event in str(pos_type_val).split(";")
+            if event.strip()
+        ]
+
+        status_list = []
+
+        for event in events:
+            if "change" in event.lower():
+                status_list.append("yes_change")
+                continue
+
+            if event in yes_positions:
+                if event.startswith(("del", "ins")):
+                    status_list.append("yes_indel")
+                elif event.startswith("mut"):
+                    status_list.append("yes_mut")
+
+
+        unique_statuses = list(dict.fromkeys(status_list))
+
+        return ";".join(unique_statuses) if unique_statuses else "no"
+
+    df_annotation["over_threshold"] = (
+        df_annotation["pos_type"].apply(process_pos_type)
+    )
+
+    return df_annotation
+
+
 def clean_hdr_positions_with_noise(df, blacklist_dict, noise_df, debug=False):
 
     df = df.copy()
@@ -1202,14 +1635,14 @@ def clean_hdr_positions_with_noise(df, blacklist_dict, noise_df, debug=False):
 
             base_p = p.replace("change", "")
 
-            # if  change → saving
+            # if  change  saving
             if "change" in p:
                 kept_positions.append(p)
                 if debug:
                     print(p, "→ KEEP (change)")
                 continue
 
-            # finding threshold в noise_df
+            # finding threshold  noise_df
             noise_threshold = noise_lookup.get((project, guide, base_p))
 
             if debug:
@@ -1217,7 +1650,7 @@ def clean_hdr_positions_with_noise(df, blacklist_dict, noise_df, debug=False):
                       "| in blacklist:", base_p in blacklist,
                       "| noise_threshold:", noise_threshold)
 
-            # if position not in noise_df — can be kept 
+            # if position not in noise_df  can be kept 
             if noise_threshold is None:
                 kept_positions.append(p)
                 continue
@@ -1271,7 +1704,7 @@ def adjust_corrections(edit_df, results_df):
         #  imperf_fin (or 0)
         imperf_fin = imperf_lookup.get(sample, 0)
 
-        #  % → в доли
+        #  % to parts
         perfect = row["Perfect_correction_%"] 
         imperfect = row["Imperfect_correction_%"] 
 
@@ -1434,7 +1867,7 @@ def build_final_summary(
 
     return final_df
 
-#логика base editing
+# base editing
 def load_annotation(sample, annotation_dir, debug=False):
     """
     Loads annotation file for sample (expanded_name)
@@ -1515,7 +1948,7 @@ def build_control_table(
         if debug:
             print(f"\nProcessing control: {sample}")
 
-        # depth + window из results
+        # depth + window from results
         depth_row = results_df[results_df["Sample"] == sample]
 
         if depth_row.empty:
