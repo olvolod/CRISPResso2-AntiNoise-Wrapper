@@ -341,6 +341,14 @@ def build_fallback_command(task, seq_df, params, param_df, fastq_dict, guide_seq
                 cmd = cmd[:idx_wc] + ["-w", w_value] + cmd[idx_wc:]
             else:
                 cmd += ["-w", w_value]
+        # Force window to start at the end of RTT (wc = 0) for extension
+    if is_extension and "-wc" in cmd:
+        idx_wc = cmd.index("-wc")
+        # Remove old -wc and its value
+        if idx_wc + 1 < len(cmd):
+            cmd = cmd[:idx_wc] + ["-wc", "0"] + cmd[idx_wc+2:]
+        else:
+            cmd = cmd[:idx_wc] + ["-wc", "0"]
     project = task.get("project", "").strip()
     cmd = apply_project_overrides(cmd, project, param_df)
     print(f"\nFALLBACK CMD: {' '.join(cmd)}")  # 
