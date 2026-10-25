@@ -47,12 +47,12 @@ def apply_project_overrides(cmd, project, param_df):
             if idx < len(changes):
                 new_value = changes[idx]
 
-                # удалить старый
+                # delete old
                 if param in cmd:
                     i = cmd.index(param)
                     cmd = cmd[:i] + cmd[i+2:]
 
-                # добавить новый
+                # add new
                 cmd += [param, new_value]
 
     return cmd
@@ -171,7 +171,7 @@ def build_command(task, seq_df, params, param_df, fastq_dict, report_dir="report
             cmd += [p, v]
     project = task.get("project", "").strip()
     cmd = apply_project_overrides(cmd, project, param_df)
-    print(f"\nDEBUG command for {sample_name}:")
+    print(f"\n command for {sample_name}:")
     print(" ".join(cmd), "...")
 
     return cmd
@@ -249,7 +249,7 @@ def update_results_table(result):
 def revcomp(seq):
     comp = str.maketrans("ACGTacgt", "TGCAtgca")
     return seq.translate(comp)[::-1]
-def get_aligned_strings(alignment, seqA, seqB): #seqA и seqB из таблицы, которую мы изначально добавляли
+def get_aligned_strings(alignment, seqA, seqB): 
     alnA, alnB = [], []
     a_i = b_i = 0
     for (a_start, a_end), (b_start, b_end) in zip(alignment.aligned[0], alignment.aligned[1]):
@@ -309,15 +309,11 @@ def build_fallback_command(task, seq_df, params, param_df, fastq_dict, guide_seq
     fallback_task["edit_mode"] = "cas9"
 
     suffix = "extension" if is_extension else "spacer"
-    fallback_task["expanded_name"] = f"{task['expanded_name']}__fallback_{suffix}"
+    fallback_task["expanded_name"] = f"{task['expanded_name']}_fallback_{suffix}"
 
     # replacing guide_id logically 
     # temporarily deliting guide_id to build command without it, then adding guide_seq manually
     fallback_task["guide_id"] = ""
-
-    # if extension → deleting expected_seq
-    # if is_extension:
-        # fallback_task["expected_seq"] = ""
 
     # building command
     cmd = build_command(fallback_task, seq_df, params, param_df, fastq_dict)
@@ -328,7 +324,7 @@ def build_fallback_command(task, seq_df, params, param_df, fastq_dict, guide_seq
         cmd = cmd[:idx] + cmd[idx+2:]
 #    cmd.append("--suppress_plots")
     # adding guide
-    insert_pos = cmd.index("-a")  # вставляем перед -a
+    insert_pos = cmd.index("-a")  
     cmd = cmd[:insert_pos] + ["-g", guide_seq] + cmd[insert_pos:]
     # extra logic for extension: quantification window size 
     if is_extension:
@@ -347,6 +343,8 @@ def build_fallback_command(task, seq_df, params, param_df, fastq_dict, guide_seq
                 cmd += ["-w", w_value]
     project = task.get("project", "").strip()
     cmd = apply_project_overrides(cmd, project, param_df)
+    print(f"\nFALLBACK CMD: {' '.join(cmd)}")  # 
+ 
     return cmd
 # fallback analysis
 def extract_variants_at_positions(aligned_read, aligned_ref, positions):
@@ -411,7 +409,7 @@ def annotate_window_variants(df, positions):
     return df
     
 def get_quant_window(sample_name, mode):
-    suffix = "__fallback_extension" if mode == "extension" else "__fallback_spacer"
+    suffix = "_fallback_extension" if mode == "extension" else "_fallback_spacer"
     sample_dir = f"report/CRISPResso_on_{sample_name}{suffix}"
 
     # possible variants of file name
@@ -430,7 +428,7 @@ def get_quant_window(sample_name, mode):
     quant_window_seq = ""
 
     if qwin_file is not None:
-        print(f"📂 Using file: {os.path.basename(qwin_file)}")
+        print(f" Using file: {os.path.basename(qwin_file)}")
 
         qwin_df = pd.read_csv(qwin_file, sep="\t", index_col=0)
 
@@ -484,7 +482,7 @@ def get_windows_and_overlap(sample_name, task_df, seq_df):
     return overlap
 
 def load_alleles(sample_name, mode):
-    suffix = "__fallback_extension" if mode == "extension" else "__fallback_spacer"
+    suffix = "_fallback_extension" if mode == "extension" else "_fallback_spacer"
     sample_dir = f"report/CRISPResso_on_{sample_name}{suffix}"
     zip_path = os.path.join(sample_dir, "Alleles_frequency_table.zip")
 
@@ -513,20 +511,20 @@ import pandas as pd
 
 def update_spacer_from_extension(spacer_df, ext_df, sample_name):
     """
-    Обновляет spacer по результатам extension.
+    Updates the spacer based on the results of the extension.
 
-    Логика:
-    1. Берём только MODIFIED аллели из extension.
-    2. Если последовательность есть в spacer:
-       - переключаем Read_Status в MODIFIED;
-       - переносим n_deleted/n_inserted/n_mutated.
-    3. Последовательности, которых нет в spacer,
-       сохраняем отдельным файлом.
+    Logic:
+    1. Consider only the MODIFIED alleles from the extension.
+    2. If a sequence is present in the spacer:
+       - set its Read_Status to MODIFIED;
+       - transfer the n_deleted/n_inserted/n_mutated values.
+    3. Sequences not found in the spacer are
+       saved to a separate file.
     """
 
     spacer = spacer_df.copy()
 
-    # словарь MODIFIED аллелей extension
+    # dict of MODIFIED alleles extension
     ext_lookup = {
         row["Aligned_Sequence"]: row
         for _, row in ext_df.iterrows()
@@ -544,22 +542,22 @@ def update_spacer_from_extension(spacer_df, ext_df, sample_name):
 
         ext_row = ext_lookup[seq]
 
-        # переключаем статус
+        # switch status
         if row["Read_Status"] == "UNMODIFIED":
             spacer.at[idx, "Read_Status"] = "MODIFIED"
             updated += 1
 
-        # переносим аннотацию из extension
+        # annotation from extension
         spacer.at[idx, "n_deleted"] = ext_row["n_deleted"]
         spacer.at[idx, "n_inserted"] = ext_row["n_inserted"]
         spacer.at[idx, "n_mutated"] = ext_row["n_mutated"]
 
-        # последовательность обработана
+
         del ext_lookup[seq]
 
     print(f"Updated spacer statuses: {updated}")
 
-    # ---------- сохраняем extension-only ----------
+    # ---------- saving extension-only ----------
     extra = pd.DataFrame(ext_lookup.values())
 
     if not extra.empty:
@@ -587,176 +585,7 @@ def update_spacer_from_extension(spacer_df, ext_df, sample_name):
             )
 
     return spacer
-# def update_spacer_from_extension(spacer_df, ext_df):
-#     """
-#     Обновляет Read_Status в spacer по результатам extension.
 
-#     Логика:
-#     1. Берём только MODIFIED аллели extension.
-#     2. Если такая последовательность есть в spacer и там UNMODIFIED,
-#        переключаем её в MODIFIED.
-#     3. Если последовательности нет в spacer,
-#        считаем её новой и добавляем в таблицу.
-#     """
-
-#     spacer = spacer_df.copy()
-
-#     # словарь MODIFIED-последовательностей extension
-#     ext_lookup = {
-#         row["Aligned_Sequence"]: row
-#         for _, row in ext_df.iterrows()
-#         if row["Read_Status"] == "MODIFIED"
-#     }
-
-#     spacer_sequences = set(spacer["Aligned_Sequence"])
-
-#     updated = 0
-
-#     for idx, row in spacer.iterrows():
-
-#         seq = row["Aligned_Sequence"]
-
-#         if seq in ext_lookup:
-
-#             if row["Read_Status"] == "UNMODIFIED":
-#                 spacer.at[idx, "Read_Status"] = "MODIFIED"
-#                 updated += 1
-
-#             # последовательность уже обработали
-#             del ext_lookup[seq]
-
-#     print(f"Updated spacer statuses: {updated}")
-
-#     # Остались только последовательности,
-#     # которых вообще нет в spacer
-#     extra = pd.DataFrame(ext_lookup.values())
-
-
-#     if not extra.empty:
-
-#         extra["Source"] = "Extension_only"
-
-#         print(
-#         f"Saved {len(extra)} extension-only alleles"
-#         )
-
-#         merged = pd.concat(
-#         [spacer, extra],
-#         ignore_index=True
-#         )
-
-#     else:
-#         spacer = spacer
-#     return spacer    
-# def filter_extension_not_in_spacer(ext_df, spacer_df):
-
-#     cols = ["Aligned_Sequence", "#Reads"]
-
-#     check = ext_df.merge(
-#         spacer_df[cols],
-#         on=cols,
-#         how="left",
-#         indicator=True
-#     )
-
-#     extra = check[check["_merge"] == "left_only"]
-
-#     print("Extra rows in extension:", len(extra))
-#     print("Extra reads:", extra["#Reads"].sum())
-    
-
-#     if not extra.empty:
-#         # Проверяем, есть ли строки НЕ являющиеся делециями
-#         non_deletions = extra[extra["n_deleted"] == 0]
-#         if not non_deletions.empty:
-#             print(f"\n[WARNING] Найдено {len(non_deletions)} строк без делеций в extra!")
-#             # Печатаем типы мутаций, которые вызывают проблему:
-#             print(non_deletions[["Aligned_Sequence", "#Reads", "Read_Status", "n_deleted", "n_inserted"]].head(10))
-#         else:
-#             print("All mismatches are deletions → OK")
-# #    if not extra.empty:
-# #        if not (extra["n_deleted"] > 0).all():
-# #            # display(extra)
-# #            raise ValueError("Non-deletion rows found in extension mismatch")
-
-# #        print("All mismatches are deletions → OK")
-
-#     ext_filtered = check[check["_merge"] == "both"].drop(columns=["_merge"])
-
-#     return ext_filtered
-
-# def process_extension(ext_df, overlap):
-
-#     ext_annot = annotate_window_variants(ext_df, overlap)
-
-#     ext_no_overlap = ext_annot[
-#         ext_annot["pos_type"] == ""
-#     ].copy()
-
-#     ext_modified = ext_no_overlap[
-#         ext_no_overlap["Read_Status"] == "MODIFIED"
-#     ].copy()
-
-#     # удалить служебные колонки
-#     for col in ["pos_type", "change"]:
-#         if col in ext_modified.columns:
-#             ext_modified.drop(columns=col, inplace=True)
-
-#     print("Extension after annotation+filter:")
-#     print("rows:", len(ext_modified))
-#     print("reads:", ext_modified["#Reads"].sum())
-
-#     return ext_modified
-
-# def apply_hdr_logic(spacer_df, ext_df):
-
-#     spacer_df = spacer_df.copy()
-#     ext_df = ext_df.copy()
-
-#     ext_sequences = set(ext_df["Aligned_Sequence"])
-
-#     for idx, row in spacer_df.iterrows():
-#         if row["Reference_Name"] == "HDR":
-#             seq = row["Aligned_Sequence"]
-
-#             if seq in ext_sequences:
-
-#                 if row["Read_Status"] == "UNMODIFIED":
-#                     spacer_df.loc[idx, "Read_Status"] = "MODIFIED"
-
-#                 ext_df = ext_df[
-#                     ext_df["Aligned_Sequence"] != seq
-#                 ]
-
-#     return spacer_df, ext_df
-
-# def remove_extension_from_spacer(spacer_df, ext_df):
-
-#     ext_sequences = set(ext_df["Aligned_Sequence"])
-
-#     spacer_filtered = spacer_df[
-#         ~spacer_df["Aligned_Sequence"].isin(ext_sequences)
-#     ].copy()
-
-#     return spacer_filtered
-
-# def final_merge(spacer_df, ext_df, original_total):
-
-#     merged = pd.concat([spacer_df, ext_df], ignore_index=True)
-
-#     merged = merged.sort_values("#Reads", ascending=False)
-
-#     final_reads = merged["#Reads"].sum()
-
-#     if final_reads != original_total:
-#         raise ValueError(
-#             f"Read mismatch: expected {original_total}, got {final_reads}"
-#         )
-
-#     print("Final rows:", len(merged))
-#     print("Final reads:", final_reads)
-
-#     return merged
 
 def process_all_samples(sample_list, task_df, seq_df):
 
@@ -767,12 +596,12 @@ def process_all_samples(sample_list, task_df, seq_df):
             merged = process_sample(sample, task_df, seq_df)
             results[sample] = merged
         except Exception as e:
-            print(f"❌ Error in {sample}: {e}")
+            print(f" Error in {sample}: {e}")
 
     return results
 
 def is_fallback_sample_done(sample_name, report_dir="report"):
-    p = Path(report_dir) / f"CRISPResso_on_{sample_name}__fallback_spacer/Alleles_frequency_table.zip"
+    p = Path(report_dir) / f"CRISPResso_on_{sample_name}_fallback_spacer/Alleles_frequency_table.zip"
     return p.exists()
 def build_non_overlapping_quant_window(sample_name, task_df, seq_df):
     ext_q = get_quant_window(sample_name, "extension")
@@ -833,30 +662,7 @@ def process_sample(sample_name, task_df, seq_df):
         )
 
     return merged
-    # ext_df_clean = filter_extension_not_in_spacer(
-    #     ext_df_raw,
-    #     spacer_df_raw
-    # )
 
-    # ext_df_processed = process_extension(ext_df_clean, overlap)
-
-    # spacer_df_hdr, ext_df_hdr = apply_hdr_logic(
-    #     spacer_df_raw,
-    #     ext_df_processed
-    # )
-
-    # spacer_df_final = remove_extension_from_spacer(
-    #     spacer_df_hdr,
-    #     ext_df_hdr
-    # )
-
-    # merged = final_merge(
-    #     spacer_df_final,
-    #     ext_df_hdr,
-    #     original_total
-    # )
-
-   # return merged
 
 def analyze_fallback_sample(sample_name, task_df, seq_df):
 
@@ -871,7 +677,7 @@ def analyze_fallback_sample(sample_name, task_df, seq_df):
     save_path = f"outcome/alleles/{sample_name}_fallback_Alleles_frequency_table.txt"
     merged.to_csv(save_path, sep="\t", index=False)
 
-    print(f"✅ Saved fallback table → {save_path}")
+    print(f"Saved fallback table → {save_path}")
 
     df = merged
 
