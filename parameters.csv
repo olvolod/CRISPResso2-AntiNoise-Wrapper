@@ -1,0 +1,16 @@
+parameters;values;project;change
+ --default_min_aln_score;60;;
+ -q;30;;
+ -s;0;;
+ --plot_window_size;20;2;10
+ --min_bp_quality_or_N;0;;
+ --exclude_bp_from_left;15;2;5
+ --exclude_bp_from_right;15;2;5
+ -w;6;;
+ -wc;-3;;
+ --write_cleaned_report;;;
+ --place_report_in_output_folder;;;
+ --prime_editing_pegRNA_extension_quantification_window_size;4;;
+ --conversion_nuc_from;G;;
+ --conversion_nuc_to;C;;
+--suppress_plots;;;
