@@ -74,7 +74,7 @@ Then:
 
 ### Step 4: Run the pipeline
 
-Navigate to the project folder and run:
+Navigate to the project folder. You can copy the directory path by right-clicking the folder in the file browser and choosing "Copy path", then run:
 
 ```python
 %cd /content/your_project_folder
