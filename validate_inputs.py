@@ -178,7 +178,7 @@ def validate_parameters(path: Path) -> bool:
 
     if bad_cells:
         print(
-            "ERROR: Excel error value(s) #NAME? or #ИМЯ? found in parameters table "
+            "ERROR: Excel error value(s) #NAME? found in parameters table "
             f"({'; '.join(bad_cells)}). Please check and correct the affected cells."
         )
         ok = False
@@ -194,17 +194,35 @@ def validate_parameters(path: Path) -> bool:
         )
         return False
 
-    names = {str(value).strip() for value in df[parameter_column]}
-    if "--suppress_plots" not in names:
-        print("WARNING: '--suppress_plots' is missing from parameters.csv.")
+    # --- check --suppress_plots ---
+    names = [str(value).strip() for value in df[parameter_column]]
+    suppress_count = names.count("--suppress_plots")
+
+    if suppress_count == 0:
+        print("ERROR: '--suppress_plots' is missing from parameters.csv.")
+        print(
+            "This flag is REQUIRED: without it, CRISPResso2 may attempt to generate plots "
+            "and crash in headless environments (e.g., Google Colab), stopping the entire pipeline."
+        )
         if ask_yes_no("Add '--suppress_plots' to parameters.csv automatically?"):
             new_row = {column: "" for column in df.columns}
             new_row[parameter_column] = "--suppress_plots"
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            df.to_csv(path, index=False, sep=";" if path.read_text(errors="ignore").count(";") >= path.read_text(errors="ignore").count(",") else ",")
+            df.to_csv(
+                path,
+                index=False,
+                sep=";" if path.read_text(errors="ignore").count(";") >= path.read_text(errors="ignore").count(",") else ",",
+            )
             print("Added '--suppress_plots' to parameters.csv.")
         else:
             print("Please add '--suppress_plots' to parameters.csv before continuing.")
+            ok = False
+    elif suppress_count > 1:
+        print(
+            "WARNING: '--suppress_plots' appears more than once in parameters.csv. "
+            "Duplicate flags may cause unexpected behavior. Please keep only one occurrence."
+        )
+        if not ask_yes_no("Have you checked and removed duplicate '--suppress_plots' entries?"):
             ok = False
 
     return ok
