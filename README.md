@@ -292,6 +292,6 @@ For prime editing fallback samples, CRISPResso2 determines the quantification wi
 ### 3. Missing --suppress_plots in parameters.csv
 The pipeline requires --suppress_plots to be present in parameters.csv. Without this flag, CRISPResso2 may attempt to generate plots, which can crash the process in headless environments (e.g., Google Colab) or on systems lacking display libraries, stopping the entire pipeline.
 
-**Solution:**
+**Solutions:**
 
 Add a row with parameters = --suppress_plots and leave values, project, and change empty. The pipeline’s input validation will detect the missing flag and offer to add it automatically. If you prefer to add it manually, ensure it appears only once in the table.
