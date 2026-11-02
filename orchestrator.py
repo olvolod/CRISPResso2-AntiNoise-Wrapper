@@ -553,6 +553,23 @@ def run_noise_post_processing(task_df, seq_df, params):
                     depth=depth
                 )
 
+                # --- Safe column reorder: %Reads/#Reads before over_threshold ---
+                try:
+                    desired = [
+                        "Aligned_Sequence", "Read_Status", "Reference_Name", "Reference_Sequence",
+                        "change", "n_deleted", "n_inserted", "n_mutated",
+                        "control_mean_used",
+                        "original_%Reads", "original_#Reads",
+                        "%Reads", "#Reads",
+                        "over_threshold", "pos_type",
+                    ]
+                    ordered = [c for c in desired if c in df_annotated.columns]
+                    leftover = [c for c in df_annotated.columns if c not in ordered]
+                    df_annotated = df_annotated[ordered + leftover]
+                except Exception as e:
+                    print(f"    [reorder] skipped for {sample_name}: {e}")
+                # -------------------------------------------------------------
+
                 df_annotated.to_csv(annotation_path, sep="\t", index=False)
                 print(f"    Annotated: {sample_name}")
 
