@@ -130,7 +130,10 @@ def annotate_hdr_window(
     import crispresso_functions as cf
 
     df = df.copy()
-
+    # --- check for empty expected_seq ---
+    if not isinstance(expected, str) or not expected.strip():
+        return df
+    # ------------------------------------
     # 1. Aligning hdr ref and ref
     aln_amp, aln_hdr = cf.align_expected_to_amplicon(
         amplicon, expected
@@ -1584,6 +1587,14 @@ def annotate_with_thresholds(df_annotation, df_thresholds, sample_name, depth=No
         return ";".join(unique_statuses) if unique_statuses else "no"
 
     df_annotation["over_threshold"] = df_annotation["pos_type"].apply(process_pos_type)
+
+    # --- SAVE ORIGINAL VALUES BEFORE SUBTRACTION ---
+    df_annotation["original_%Reads"] = df_annotation["%Reads"]
+    if "#Reads" in df_annotation.columns:
+        df_annotation["original_#Reads"] = df_annotation["#Reads"]
+    # -----------------------------------------------
+
+
 
     def subtract_control(row):
 
